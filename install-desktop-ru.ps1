@@ -449,12 +449,12 @@ if ($m.Success -and $loader -notmatch 'ru:"common\.language\.russian"') {
 Report-PatchState -Name 'LOCALE_LABEL_KEYS' -State $labelsState
 
 $normState = 'FAILED'
-$m = [regex]::Match($loader, '(e==="tr"\|\|e\.startsWith\("tr-"\)\?"tr":)(P0|\$[0-9])\}')
+$m = [regex]::Match($loader, '(e==="tr"\|\|e\.startsWith\("tr-"\)\?"tr":)([A-Za-z_$][A-Za-z0-9_$]*)\}')
 $normPrefix = $null; $normDefault = $null
 if ($m.Success) { $normPrefix = $m.Groups[1].Value; $normDefault = $m.Groups[2].Value }
 if (-not $m.Success) {
   # Fallback for older builds (v1.14.x)
-  $m = [regex]::Match($loader, '(e==="pl"\|\|e\.startsWith\("pl-"\)\?"pl":)(\$[0-9])\}')
+  $m = [regex]::Match($loader, '(e==="pl"\|\|e\.startsWith\("pl-"\)\?"pl":)([A-Za-z_$][A-Za-z0-9_$]*)\}')
   if ($m.Success) { $normPrefix = $m.Groups[1].Value; $normDefault = $m.Groups[2].Value }
 }
 if ($m.Success -and $loader -notmatch 'startsWith\("ru-"\)') {
@@ -506,8 +506,8 @@ if ($jfState -ne 'patched') {
   # Newer builds (v1.22.x): minified names differ, resolve them dynamically.
   # Init looks like: function $z(){po.getState().setLocale(Oz())}
   # Cache looks like: const Cm=new Map([[P0,A0]])
-  $mi = [regex]::Match($loader, 'function (\$?[A-Za-z0-9_]+)\(\)\{([A-Za-z0-9_]+)\.getState\(\)\.setLocale\(([A-Za-z0-9_]+)\(\)\)\}')
-  $mc = [regex]::Match($loader, 'const (\w+)=new Map\(\[\[[A-Za-z0-9_]+,[A-Za-z0-9_]+\]\]\)')
+  $mi = [regex]::Match($loader, 'function ([A-Za-z_$][A-Za-z0-9_$]*)\(\)\{([A-Za-z_$][A-Za-z0-9_$]*)\.getState\(\)\.setLocale\(([A-Za-z_$][A-Za-z0-9_$]*)\(\)\)\}')
+  $mc = [regex]::Match($loader, 'const ([A-Za-z_$][A-Za-z0-9_$]*)=new Map\(\[\[[A-Za-z_$][A-Za-z0-9_$]*,[A-Za-z_$][A-Za-z0-9_$]*\]\]\)')
   if ($mi.Success -and $mc.Success -and $loader -notmatch 'setLocale\("ru"\)') {
     $initOrigText = $mi.Value
     $fnInit = $mi.Groups[1].Value; $fnStore = $mi.Groups[2].Value
