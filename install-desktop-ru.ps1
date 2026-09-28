@@ -541,7 +541,19 @@ $localeFiles = Get-ChildItem -LiteralPath $assets -Filter '*.js' -ErrorAction Si
   $_.Name -match '^(en|fr|zh-CN|zh-TW|uk|es|pt-BR|ko|pl|ja|de|tr)-' -and $_.Name -notmatch '^ru-'
 }
 $localeFailed = @()
+$localeSkipped = @()
+$localeHandled = 0
 foreach ($f in $localeFiles) {
+  # NOTE: начиная с 2.0.3 сборка кладёт рядом сторонние данные локалей
+  # (пакеты иконочного пикера вида de-DE-*.js, ru-RU-*.js) с тем же префиксом
+  # имени. Настоящие словари UI всегда содержат ключи common.language.* —
+  # файлы без них пропускаем, а не валим установку.
+  $probe = [System.IO.File]::ReadAllText($f.FullName, [System.Text.Encoding]::UTF8)
+  if ($probe -notmatch 'common\.language\.') {
+    Write-Host ("  " + $f.Name + " -> не словарь UI, пропускаю") -ForegroundColor DarkGray
+    $localeSkipped += $f.Name
+    continue
+  }
   $bak = "$($f.FullName).bak"
   if (-not (Test-Path -LiteralPath $bak)) {
     $chunkText = [System.IO.File]::ReadAllText($f.FullName, [System.Text.Encoding]::UTF8)
@@ -554,14 +566,21 @@ foreach ($f in $localeFiles) {
   }
   $r = Patch-LocaleFile -Path $f.FullName
   switch ($r) {
-    'patched'    { Write-Ok "  $($f.Name) -> пропатчено"; $script:touchedFiles += $f.FullName }
-    'already'    { Write-Host ("  " + $f.Name + " -> уже пропатчено") -ForegroundColor DarkGray }
+    'patched'    { Write-Ok "  $($f.Name) -> пропатчено"; $script:touchedFiles += $f.FullName; $localeHandled++ }
+    'already'    { Write-Host ("  " + $f.Name + " -> уже пропатчено") -ForegroundColor DarkGray; $localeHandled++ }
     'no-anchor'  { Write-Err "  $($f.Name) -> нет якоря"; $localeFailed += $f.Name }
   }
 }
 if ($localeFailed.Count -gt 0) {
   Invoke-Rollback -ChunkPath $ruPath
   throw ("Не сработали патчи чанков локалей: " + ($localeFailed -join ', ') + ". Файлы откатаны.")
+}
+if ($localeHandled -eq 0) {
+  Invoke-Rollback -ChunkPath $ruPath
+  throw ("Не найден ни один словарь локалей (пропущено посторонних файлов: $($localeSkipped.Count)). Похоже, новая сборка OpenChamber изменила формат чанков. Файлы откатаны.")
+}
+if ($localeSkipped.Count -gt 0) {
+  Write-Host ("  Пропущено посторонних файлов: $($localeSkipped.Count)") -ForegroundColor DarkGray
 }
 
 Next-Step 'Проверка установки'
@@ -595,7 +614,9 @@ if ($verifyErrors.Count -gt 0) {
 Write-Ok 'Проверка пройдена.'
 
 # Only now is it safe to remove obsolete ru chunks (loader references the new one).
-Get-ChildItem -LiteralPath $assets -Filter 'ru-*.js' -ErrorAction SilentlyContinue | Where-Object { $_.Name -ne $ruFileName } | ForEach-Object {
+# NOTE: удаляем только наши чанки вида ru-<8 hex>.js; stock-файлы сборки
+# (ru-RU-*.js и т.п., появились в 2.0.3) трогать нельзя.
+Get-ChildItem -LiteralPath $assets -Filter 'ru-*.js' -ErrorAction SilentlyContinue | Where-Object { $_.Name -ne $ruFileName -and $_.Name -match '^ru-[0-9a-f]{8}\.js$' } | ForEach-Object {
   Write-Warn "Удаляю устаревший ru-чанк: $($_.Name)"
   Remove-Item -LiteralPath $_.FullName -Force
 }
