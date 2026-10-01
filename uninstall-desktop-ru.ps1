@@ -192,8 +192,11 @@ if ($i18nFile) {
 }
 
 Write-Step 'Восстанавливаю чанки локалей из бэкапов...'
+# Список локалей держим в паре с установщиком (install-desktop-ru.ps1, шаг 5).
+# Если добавить новую локаль там и забыть здесь — uninstall оставит её .bak.
+$localeRx = '^(en|fr|zh-CN|zh-TW|uk|es|pt-BR|ko|pl|ja|de|tr|nl)-'
 $localeFiles = Get-ChildItem -LiteralPath $assets -Filter '*.js' -ErrorAction SilentlyContinue | Where-Object {
-  $_.Name -match '^(en|fr|zh-CN|zh-TW|uk|es|pt-BR|ko|pl|ja|de|tr)-'
+  $_.Name -match $localeRx
 }
 $restored = 0
 $surgicallyCleaned = 0
@@ -233,7 +236,7 @@ if ($i18nFile -and (Test-Path -LiteralPath $i18nFile.FullName)) {
   if ($hit.Count -gt 0) { Write-Err ("  в лоадере остались RU-маркеры: " + ($hit -join ', ')); $verifyOk = $false }
 }
 $localeLeft = @(Get-ChildItem -LiteralPath $assets -Filter '*.js' -ErrorAction SilentlyContinue | Where-Object {
-  $_.Name -match '^(en|fr|zh-CN|zh-TW|uk|es|pt-BR|ko|pl|ja|de|tr)-'
+  $_.Name -match $localeRx
 } | Where-Object {
   [System.IO.File]::ReadAllText($_.FullName, [System.Text.Encoding]::UTF8) -match 'common\.language\.russian'
 })

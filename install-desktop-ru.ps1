@@ -396,15 +396,20 @@ Write-Ok "Записан $ruPath"
 
 Next-Step 'Бэкап и патч лоадера i18n'
 Write-Step 'Бэкап лоадера...'
-if (($loaderText -match 't==="ru"') -and -not (Test-Path -LiteralPath "$i18nFile.bak")) {
+$loaderAlreadyPatched = ($loaderText -match 't==="ru"')
+if ($loaderAlreadyPatched -and -not (Test-Path -LiteralPath "$i18nFile.bak")) {
   Write-Warn 'Лоадер уже содержит RU-правки, а бэкапа нет — пропускаю бэкап.'
   Write-Warn 'Удаление пойдёт через хирургический откат лоадера.'
 } elseif (Backup-File -Path $i18nFile) {
   Write-Ok 'Бэкап создан: useAppFontEffects-*.js.bak'
   $script:createdBaks += "$i18nFile.bak"
-} elseif ($Force) {
+} elseif ($Force -and -not $loaderAlreadyPatched) {
   Copy-Item -LiteralPath $i18nFile -Destination "$i18nFile.bak" -Force
   Write-Warn 'Бэкап перезаписан (-Force).'
+} elseif ($Force) {
+  # КРИТИЧНО: перезаписать бэкап уже пропатченным лоадером нельзя — откат
+  # станет невозможен, и uninstall не сможет вернуть стоковый файл.
+  Write-Warn 'Лоадер уже пропатчен, а бэкап есть — бэкап НЕ перезаписываю (даже с -Force).'
 } else {
   Write-Warn 'Бэкап уже есть (укажите -Force чтобы перезаписать). Продолжаю.'
 }
@@ -538,7 +543,7 @@ if ($loader -ne $origLoader) {
 Next-Step 'Патч остальных локалей'
 Write-Step 'Добавляю common.language.russian в остальные локали...'
 $localeFiles = Get-ChildItem -LiteralPath $assets -Filter '*.js' -ErrorAction SilentlyContinue | Where-Object {
-  $_.Name -match '^(en|fr|zh-CN|zh-TW|uk|es|pt-BR|ko|pl|ja|de|tr)-' -and $_.Name -notmatch '^ru-'
+  $_.Name -match '^(en|fr|zh-CN|zh-TW|uk|es|pt-BR|ko|pl|ja|de|tr|nl)-' -and $_.Name -notmatch '^ru-'
 }
 $localeFailed = @()
 $localeSkipped = @()
