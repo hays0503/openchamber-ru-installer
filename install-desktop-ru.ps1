@@ -76,6 +76,29 @@ function Find-FileByPattern {
   return $null
 }
 
+# Находит .js-файл в $Dir, в котором присутствуют ВСЕ искомые regex-паттерны.
+# Сначала проверяет файлы с именем вида $PreferredFilter (если задан), затем все остальные.
+function Find-ContentFile {
+  param([string]$Dir,[string[]]$Patterns,[string]$PreferredFilter)
+  $rx = @($Patterns | ForEach-Object { [regex]$_ })
+  $files = @(Get-ChildItem -LiteralPath $Dir -Filter '*.js' -File -ErrorAction SilentlyContinue | Where-Object { $_.Name -notmatch '\.bak$' })
+  $test = {
+    param($full)
+    $s = [System.IO.File]::ReadAllText($full, [System.Text.Encoding]::UTF8)
+    foreach ($r in $rx) { if (-not $r.IsMatch($s)) { return $false } }
+    return $true
+  }
+  if ($PreferredFilter) {
+    foreach ($f in ($files | Where-Object { $_.Name -like $PreferredFilter })) {
+      if (& $test $f.FullName) { return $f.FullName }
+    }
+  }
+  foreach ($f in $files) {
+    if (& $test $f.FullName) { return $f.FullName }
+  }
+  return $null
+}
+
 function Backup-File {
   param([string]$Path)
   $bak = "$Path.bak"
@@ -271,16 +294,34 @@ function Invoke-Rollback {
 }
 
 function Test-PatchedLoader {
-  param([string]$Loader,[string]$ChunkName)
+  param([string]$Core,[string]$Intl,[string]$ChunkName)
   $res = @()
-  $res += @{ n = 'locales';   ok = ($Loader -match ',"ru"\]') }
-  $res += @{ n = 'labels';    ok = ($Loader -match 'ru:"common\.language\.russian"') }
-  $res += @{ n = 'normalize'; ok = ($Loader -match 'startsWith\("ru-"\)') }
-  $res += @{ n = 'import';    ok = ($Loader.Contains($ChunkName) -and ($Loader -match 't==="ru"')) }
-  $res += @{ n = 'init';      ok = ($Loader -match 'setLocale\("ru"\)') }
+  $res += @{ n = 'locales';   ok = ($Core -match ',"ru"\]') }
+  $res += @{ n = 'labels';    ok = ($Core -match 'ru:"common\.language\.russian"') }
+  $res += @{ n = 'normalize'; ok = ($Core -match 'startsWith\("ru-"\)') }
+  $res += @{ n = 'import';    ok = ($Core.Contains($ChunkName) -and ($Core -match '[A-Za-z_$][A-Za-z0-9_$]*==="ru"\?await')) }
+  $res += @{ n = 'init';      ok = ($Core -match 'setLocale\("ru"\)') }
   # INTL-карта: либо ru:"ru-RU" добавлен, либо карты нет вовсе (старые сборки).
-  $res += @{ n = 'intl';      ok = (($Loader -match 'ru:"ru-RU"') -or ($Loader -notmatch '\{en:"en-US"')) }
+  $res += @{ n = 'intl';      ok = (($Intl -match 'ru:"ru-RU"') -or ($Intl -notmatch '\{en:"en-US"')) }
   return $res
+}
+
+# Добавляет ru:"ru-RU" в INTL-карту локалей ({en:"en-US",...,tr:"tr-TR"}).
+# Возвращает @{ text; state }: state = patched | already | skip | FAILED.
+function Patch-IntlMap {
+  param([string]$Text)
+  $m = [regex]::Match($Text, '\{en:"en-US"[^{}]{0,400}?\}')
+  if ($m.Success -and $m.Value -notmatch 'ru:"ru-RU"') {
+    $replacement = $m.Value.Substring(0, $m.Value.Length - 1) + ',ru:"ru-RU"}'
+    return @{ text = $Text.Substring(0, $m.Index) + $replacement + $Text.Substring($m.Index + $m.Length); state = 'patched' }
+  }
+  if ($Text -match 'ru:"ru-RU"') { return @{ text = $Text; state = 'already' } }
+  if (-not $m.Success -and $Text -notmatch '\{en:"en-US"') {
+    # Старые сборки (v1.14.x) могли не иметь этой карты вовсе — там и время
+    # форматируется иначе. Не валим установку, только предупреждаем.
+    return @{ text = $Text; state = 'skip' }
+  }
+  return @{ text = $Text; state = 'FAILED' }
 }
 
 function Stop-AppIfRunning {
@@ -342,19 +383,31 @@ Write-Step "Версия приложения: $appVersion"
 $stampPath = Join-Path $assets '.ru-patch.json'
 $stamp = Read-PatchStamp -StampPath $stampPath
 
-$i18nFile = Find-FileByPattern -Dir $assets -Pattern 'useAppFontEffects-*.js'
-if (-not $i18nFile) { throw "Не найден useAppFontEffects-*.js в $assets" }
-Write-Step "Файл лоадера i18n: $(Split-Path -Leaf $i18nFile)"
+# i18n-ядро (LOCALES-массив + карта подписей локалей) ищем ПО КОНТЕНТУ, а не по имени:
+# в 2.2.x это отдельный chank index-*.js, в 2.1.x — тот же useAppFontEffects-*.js.
+$coreFile = Find-ContentFile -Dir $assets -Patterns @('\["en"(?:,"[A-Za-z-]+")+\]', 'tr:"common\.language\.turkish"')
+if (-not $coreFile) { throw "Не найдено ядро i18n (LOCALES-массив + карта локалей) в $assets" }
+Write-Step "Файл ядра i18n: $(Split-Path -Leaf $coreFile)"
+
+# INTL-карта locale -> Intl-тег ({en:"en-US",...,tr:"tr-TR"}) в 2.2.x живёт в
+# лоадере useAppFontEffects-*.js, в 2.1.x — в том же файле, что и ядро.
+$intlFile = Find-ContentFile -Dir $assets -Patterns @('\{en:"en-US"[^{}]{0,400}?\}') -PreferredFilter 'useAppFontEffects-*.js'
+if (-not $intlFile) { $intlFile = $coreFile }
+$sameFile = ($coreFile -eq $intlFile)
+Write-Step "Файл INTL-карты: $(Split-Path -Leaf $intlFile)"
+if ($sameFile) { Write-Host '  Ядро и INTL-карта в одном файле (раскладка 2.1.x).' -ForegroundColor DarkGray }
 
 # Detect stale leftovers (e.g. app updated without uninstall): loader unpatched
 # but .bak / ru chunks / stamp from a previous install still present.
-$loaderText = [System.IO.File]::ReadAllText($i18nFile, [System.Text.Encoding]::UTF8)
-$loaderHasRu = $loaderText -match 't==="ru"'
+$coreText = [System.IO.File]::ReadAllText($coreFile, [System.Text.Encoding]::UTF8)
+$intlText  = [System.IO.File]::ReadAllText($intlFile, [System.Text.Encoding]::UTF8)
+$ruMarkerRx = '==="ru"\?await|,"ru"\]|ru:"common\.language\.russian"|setLocale\("ru"\)|ru:"ru-RU"'
+$filesHasRu = (($coreText -match $ruMarkerRx) -or ($intlText -match $ruMarkerRx))
 $anyBak = @(Get-ChildItem -LiteralPath $assets -Filter '*.bak' -ErrorAction SilentlyContinue).Count -gt 0
 $staleReason = $null
 if ($stamp -and $stamp.appVersion -and $appVersion -ne 'unknown' -and $stamp.appVersion -ne $appVersion) {
   $staleReason = "приложение обновилось после патча (было $($stamp.appVersion), стало $appVersion)"
-} elseif (-not $stamp -and $anyBak -and -not $loaderHasRu) {
+} elseif (-not $stamp -and $anyBak -and -not $filesHasRu) {
   $staleReason = 'найдены осиротевшие бэкапы прошлой установки'
 }
 if ($staleReason) {
@@ -396,28 +449,34 @@ Write-Ok "Записан $ruPath"
 # NOTE: stale ru-*.js chunks are removed only after successful verification (see below),
 # so a failed run never leaves the loader pointing at a deleted chunk.
 
-Next-Step 'Бэкап и патч лоадера i18n'
-Write-Step 'Бэкап лоадера...'
-$loaderAlreadyPatched = ($loaderText -match 't==="ru"')
-if ($loaderAlreadyPatched -and -not (Test-Path -LiteralPath "$i18nFile.bak")) {
-  Write-Warn 'Лоадер уже содержит RU-правки, а бэкапа нет — пропускаю бэкап.'
-  Write-Warn 'Удаление пойдёт через хирургический откат лоадера.'
-} elseif (Backup-File -Path $i18nFile) {
-  Write-Ok 'Бэкап создан: useAppFontEffects-*.js.bak'
-  $script:createdBaks += "$i18nFile.bak"
-} elseif ($Force -and -not $loaderAlreadyPatched) {
-  Copy-Item -LiteralPath $i18nFile -Destination "$i18nFile.bak" -Force
-  Write-Warn 'Бэкап перезаписан (-Force).'
-} elseif ($Force) {
-  # КРИТИЧНО: перезаписать бэкап уже пропатченным лоадером нельзя — откат
-  # станет невозможен, и uninstall не сможет вернуть стоковый файл.
-  Write-Warn 'Лоадер уже пропатчен, а бэкап есть — бэкап НЕ перезаписываю (даже с -Force).'
-} else {
-  Write-Warn 'Бэкап уже есть (укажите -Force чтобы перезаписать). Продолжаю.'
+Next-Step 'Бэкап и патч файлов i18n'
+$patchFiles = @($coreFile)
+if (-not $sameFile) { $patchFiles += $intlFile }
+foreach ($pf in $patchFiles) {
+  $leaf = Split-Path -Leaf $pf
+  $pfHasRu = ([System.IO.File]::ReadAllText($pf, [System.Text.Encoding]::UTF8) -match $ruMarkerRx)
+  if ($pfHasRu -and -not (Test-Path -LiteralPath "$pf.bak")) {
+    Write-Warn "$leaf уже содержит RU-правки, а бэкапа нет — пропускаю бэкап."
+    Write-Warn 'Удаление пойдёт через хирургический откат.'
+  } elseif (Backup-File -Path $pf) {
+    Write-Ok "Бэкап создан: $leaf.bak"
+    $script:createdBaks += "$pf.bak"
+  } elseif ($Force -and -not $pfHasRu) {
+    Copy-Item -LiteralPath $pf -Destination "$pf.bak" -Force
+    Write-Warn "Бэкап перезаписан (-Force): $leaf.bak"
+  } elseif ($Force) {
+    # КРИТИЧНО: перезаписать бэкап уже пропатченным лоадером нельзя — откат
+    # станет невозможен, и uninstall не сможет вернуть стоковый файл.
+    Write-Warn "$leaf уже пропатчен, а бэкап есть — бэкап НЕ перезаписываю (даже с -Force)."
+  } else {
+    Write-Warn "Бэкап уже есть ($leaf.bak, укажите -Force чтобы перезаписать). Продолжаю."
+  }
 }
 
-$loader = [System.IO.File]::ReadAllText($i18nFile, [System.Text.Encoding]::UTF8)
-$origLoader = $loader
+$core = $coreText
+$intl = $intlText
+$origCore = $core
+$origIntl = $intl
 
 $patchStates = @{}
 function Report-PatchState {
@@ -430,46 +489,48 @@ function Report-PatchState {
 }
 
 $localesState = 'FAILED'
-$m = [regex]::Match($loader, '\["en"(?:,"[A-Za-z-]+")+\]')
+$m = [regex]::Match($core, '\["en"(?:,"[A-Za-z-]+")+\]')
 if ($m.Success -and $m.Value -notmatch '"ru"') {
   $arr = $m.Value.TrimEnd(']') + ',"ru"]'
-  $loader = $loader.Substring(0, $m.Index) + $arr + $loader.Substring($m.Index + $m.Length)
+  $core = $core.Substring(0, $m.Index) + $arr + $core.Substring($m.Index + $m.Length)
   $localesState = 'patched'
-} elseif ($loader -match ',"ru"\]') {
+} elseif ($core -match ',"ru"\]') {
   $localesState = 'already'
 }
 Report-PatchState -Name 'LOCALES array' -State $localesState
 
 $labelsState = 'FAILED'
-$m = [regex]::Match($loader, 'tr:"common\.language\.turkish"\}')
+$m = [regex]::Match($core, 'tr:"common\.language\.turkish"\}')
 $labelsReplacement = 'tr:"common.language.turkish",ru:"common.language.russian"}'
 if (-not $m.Success) {
   # Fallback for older builds (v1.14.x) without de/tr locales
-  $m = [regex]::Match($loader, '(ja:"common\.language\.japanese"\s*,?\s*\})')
+  $m = [regex]::Match($core, '(ja:"common\.language\.japanese"\s*,?\s*\})')
   $labelsReplacement = 'ja:"common.language.japanese",ru:"common.language.russian"}'
 }
-if ($m.Success -and $loader -notmatch 'ru:"common\.language\.russian"') {
-  $loader = $loader.Substring(0, $m.Index) + $labelsReplacement + $loader.Substring($m.Index + $m.Length)
+if ($m.Success -and $core -notmatch 'ru:"common\.language\.russian"') {
+  $core = $core.Substring(0, $m.Index) + $labelsReplacement + $core.Substring($m.Index + $m.Length)
   $labelsState = 'patched'
-} elseif ($loader -match 'ru:"common\.language\.russian"') {
+} elseif ($core -match 'ru:"common\.language\.russian"') {
   $labelsState = 'already'
 }
 Report-PatchState -Name 'LOCALE_LABEL_KEYS' -State $labelsState
 
+# normalizeLocale: имя параметра функции берём из реального кода tr-ветки через
+# обратную ссылку (в 2.2.0 параметр t, в 2.1.x был e).
 $normState = 'FAILED'
-$m = [regex]::Match($loader, '(e==="tr"\|\|e\.startsWith\("tr-"\)\?"tr":)([A-Za-z_$][A-Za-z0-9_$]*)\}')
-$normPrefix = $null; $normDefault = $null
-if ($m.Success) { $normPrefix = $m.Groups[1].Value; $normDefault = $m.Groups[2].Value }
+$m = [regex]::Match($core, '([A-Za-z_$][A-Za-z0-9_$]*)==="tr"\|\|\1\.startsWith\("tr-"\)\?"tr":([A-Za-z_$][A-Za-z0-9_$]*)\}')
+$normParam = $null; $normDefault = $null
+if ($m.Success) { $normParam = $m.Groups[1].Value; $normDefault = $m.Groups[2].Value }
 if (-not $m.Success) {
-  # Fallback for older builds (v1.14.x)
-  $m = [regex]::Match($loader, '(e==="pl"\|\|e\.startsWith\("pl-"\)\?"pl":)([A-Za-z_$][A-Za-z0-9_$]*)\}')
-  if ($m.Success) { $normPrefix = $m.Groups[1].Value; $normDefault = $m.Groups[2].Value }
+  # Fallback for older builds (v1.14.x): последняя известная локаль — pl
+  $m = [regex]::Match($core, '([A-Za-z_$][A-Za-z0-9_$]*)==="pl"\|\|\1\.startsWith\("pl-"\)\?"pl":([A-Za-z_$][A-Za-z0-9_$]*)\}')
+  if ($m.Success) { $normParam = $m.Groups[1].Value; $normDefault = $m.Groups[2].Value }
 }
-if ($m.Success -and $loader -notmatch 'startsWith\("ru-"\)') {
-  $replacement = $normPrefix + 'e==="ru"||e.startsWith("ru-")?"ru":' + $normDefault + '}'
-  $loader = $loader.Substring(0, $m.Index) + $replacement + $loader.Substring($m.Index + $m.Length)
+if ($m.Success -and $core -notmatch 'startsWith\("ru-"\)') {
+  $replacement = $normParam + '==="ru"||' + $normParam + '.startsWith("ru-")?"ru":' + $normDefault + '}'
+  $core = $core.Substring(0, $m.Index) + $replacement + $core.Substring($m.Index + $m.Length)
   $normState = 'patched'
-} elseif ($loader -match 'startsWith\("ru-"\)') {
+} elseif ($core -match 'startsWith\("ru-"\)') {
   $normState = 'already'
 }
 Report-PatchState -Name 'normalizeLocale' -State $normState
@@ -477,41 +538,38 @@ Report-PatchState -Name 'normalizeLocale' -State $normState
 # INTL-карта locale -> Intl-тег ({en:"en-US",...,tr:"tr-TR"}) не знает про "ru",
 # и getCurrentIntlLocale() молча падает на "en-US": 12-часовой формат (AM/PM),
 # en-US порядок дат и запятая в числах. Добавляем ru:"ru-RU" -> 24-часовой формат.
+# В двухфайловой раскладке (2.2.x) карта в лоадере $intl, в однофайловой (2.1.x) — в ядре.
 $intlState = 'FAILED'
-$m = [regex]::Match($loader, '\{en:"en-US"[^{}]{0,400}?\}')
-if ($m.Success -and $m.Value -notmatch 'ru:"ru-RU"') {
-  $replacement = $m.Value.Substring(0, $m.Value.Length - 1) + ',ru:"ru-RU"}'
-  $loader = $loader.Substring(0, $m.Index) + $replacement + $loader.Substring($m.Index + $m.Length)
-  $intlState = 'patched'
-} elseif ($loader -match 'ru:"ru-RU"') {
-  $intlState = 'already'
-} elseif (-not $m.Success -and $loader -notmatch '\{en:"en-US"') {
-  # Старые сборки (v1.14.x) могли не иметь этой карты вовсе — там и время
-  # форматируется иначе. Не валим установку, только предупреждаем.
-  $intlState = 'skip'
-  Write-Warn 'INTL-карта локалей не найдена (старая сборка?) — формат времени останется системным.'
-}
+$intlTarget = if ($sameFile) { $core } else { $intl }
+$r = Patch-IntlMap -Text $intlTarget
+$intlTarget = $r.text
+if ($sameFile) { $core = $intlTarget } else { $intl = $intlTarget }
+$intlState = $r.state
+if ($intlState -eq 'skip') { Write-Warn 'INTL-карта локалей не найдена (старая сборка?) — формат времени останется системным.' }
 Report-PatchState -Name 'INTL locale map (ru -> ru-RU)' -State $intlState
 
+# Динамический импорт ru-чанка: режем ветку tr/pl и вставляем ru-ветку сразу после.
+# Имя параметра и import-функции берём из реального кода (в 2.2.0 это e + Ue,
+# в 2.1.x были t + имя с m).
 $importState = 'FAILED'
-if ($loader -match (':t==="ru"\?await\s+\w+\(\(\)=>import\("\./' + [regex]::Escape($ruFileName) + '"\)')) {
+if ($core -match (':[A-Za-z_$][A-Za-z0-9_$]*==="ru"\?await\s+\w+\(\(\)=>import\("\./' + [regex]::Escape($ruFileName) + '"\)')) {
   # Актуальный ru-импорт уже на месте — делать нечего.
   $importState = 'already'
 } else {
   # Remove any stale ru import first (old bare format and new Vite mapDeps format)
-  $loader = $loader -replace ':t==="ru"\?await\s+\w+\(\(\)=>import\("\./ru-[^"]+\.js"\)(?:,__vite__mapDeps\(\[[0-9,]*\]\))?(?:,\[\])?\)', ''
-  $m = [regex]::Match($loader, 't==="tr"\?await\s+(\w+)\(\(\)=>import\("\./tr-[A-Za-z0-9_.-]+\.js"\),(__vite__mapDeps\(\[[0-9,]+\]\))\)')
-  $importFn = $null; $importDeps = $null
-  if ($m.Success) { $importFn = $m.Groups[1].Value; $importDeps = $m.Groups[2].Value }
+  $core = $core -replace ':[A-Za-z_$][A-Za-z0-9_$]*==="ru"\?await\s+\w+\(\(\)=>import\("\./ru-[^"]+\.js"\)(?:,__vite__mapDeps\(\[[0-9,]*\]\))?(?:,\[\])?\)', ''
+  $m = [regex]::Match($core, '([A-Za-z_$][A-Za-z0-9_$]*)==="tr"\?await\s+(\w+)\(\(\)=>import\("\./tr-[A-Za-z0-9_.-]+\.js"\),(__vite__mapDeps\(\[[0-9,]+\]\))\)')
+  $importParam = $null; $importFn = $null; $importDeps = $null
+  if ($m.Success) { $importParam = $m.Groups[1].Value; $importFn = $m.Groups[2].Value; $importDeps = $m.Groups[3].Value }
   if (-not $m.Success) {
     # Fallback for older builds (v1.14.x, bare imports without mapDeps)
-    $m = [regex]::Match($loader, 't==="pl"\?await\s+([a-zA-Z_]+)\(\(\)=>import\("\./pl-[A-Za-z0-9_-]+\.js"\),\[\]\)')
-    if ($m.Success) { $importFn = $m.Groups[1].Value; $importDeps = '[]' }
+    $m = [regex]::Match($core, '([A-Za-z_$][A-Za-z0-9_$]*)==="pl"\?await\s+([a-zA-Z_]+)\(\(\)=>import\("\./pl-[A-Za-z0-9_-]+\.js"\),\[\]\)')
+    if ($m.Success) { $importParam = $m.Groups[1].Value; $importFn = $m.Groups[2].Value; $importDeps = '[]' }
   }
   if ($m.Success) {
-    $ruImport = ':t==="ru"?await ' + $importFn + '(()=>import("./' + $ruFileName + '"),' + $importDeps + ')'
+    $ruImport = ':' + $importParam + '==="ru"?await ' + $importFn + '(()=>import("./' + $ruFileName + '"),' + $importDeps + ')'
     $insertionPoint = $m.Index + $m.Length
-    $loader = $loader.Substring(0, $insertionPoint) + $ruImport + $loader.Substring($insertionPoint)
+    $core = $core.Substring(0, $insertionPoint) + $ruImport + $core.Substring($insertionPoint)
     $importState = 'patched'
   }
 }
@@ -519,30 +577,30 @@ Report-PatchState -Name 'dynamic import chain' -State $importState
 
 $jfState = 'FAILED'
 $initOrigText = $null
-$m = [regex]::Match($loader, 'function JF\(\)\{Is\.getState\(\)\.setLocale\(KF\(\)\)\}')
-if ($m.Success -and $loader -notmatch 'setLocale\("ru"\)') {
+$m = [regex]::Match($core, 'function JF\(\)\{Is\.getState\(\)\.setLocale\(KF\(\)\)\}')
+if ($m.Success -and $core -notmatch 'setLocale\("ru"\)') {
   # Older builds (v1.14.x)
   $initOrigText = $m.Value
   $replacement = 'function JF(){try{typeof window!="undefined"&&window.localStorage.setItem("openchamber.i18n.v1",JSON.stringify({locale:"ru"}))}catch{}try{y3.delete("ru")}catch(e){}Is.getState().setLocale("ru")}'
-  $loader = $loader.Substring(0, $m.Index) + $replacement + $loader.Substring($m.Index + $m.Length)
+  $core = $core.Substring(0, $m.Index) + $replacement + $core.Substring($m.Index + $m.Length)
   $jfState = 'patched'
-} elseif ($loader -match 'setLocale\("ru"\)') {
+} elseif ($core -match 'setLocale\("ru"\)') {
   $jfState = 'already'
 }
 if ($jfState -ne 'patched') {
   # Newer builds (v1.22.x): minified names differ, resolve them dynamically.
   # Init looks like: function $z(){po.getState().setLocale(Oz())}
-  # Cache looks like: const Cm=new Map([[P0,A0]])
-  $mi = [regex]::Match($loader, 'function ([A-Za-z_$][A-Za-z0-9_$]*)\(\)\{([A-Za-z_$][A-Za-z0-9_$]*)\.getState\(\)\.setLocale\(([A-Za-z_$][A-Za-z0-9_$]*)\(\)\)\}')
-  $mc = [regex]::Match($loader, 'const ([A-Za-z_$][A-Za-z0-9_$]*)=new Map\(\[\[[A-Za-z_$][A-Za-z0-9_$]*,[A-Za-z_$][A-Za-z0-9_$]*\]\]\)')
-  if ($mi.Success -and $mc.Success -and $loader -notmatch 'setLocale\("ru"\)') {
+  # Cache looks like: const Cm=new Map([[P0,A0]]) (в 2.2.0 кэш объявлен без const: yr=new Map([[pi,ui]]))
+  $mi = [regex]::Match($core, 'function ([A-Za-z_$][A-Za-z0-9_$]*)\(\)\{([A-Za-z_$][A-Za-z0-9_$]*)\.getState\(\)\.setLocale\(([A-Za-z_$][A-Za-z0-9_$]*)\(\)\)\}')
+  $mc = [regex]::Match($core, '(?:const )?([A-Za-z_$][A-Za-z0-9_$]*)=new Map\(\[\[[A-Za-z_$][A-Za-z0-9_$]*,[A-Za-z_$][A-Za-z0-9_$]*\]\]\)')
+  if ($mi.Success -and $mc.Success -and $core -notmatch 'setLocale\("ru"\)') {
     $initOrigText = $mi.Value
     $fnInit = $mi.Groups[1].Value; $fnStore = $mi.Groups[2].Value
     $fnCache = $mc.Groups[1].Value
     $replacement = 'function ' + $fnInit + '(){try{typeof window!="undefined"&&window.localStorage.setItem("openchamber.i18n.v1",JSON.stringify({locale:"ru"}))}catch{}try{' + $fnCache + '.delete("ru")}catch(e){}' + $fnStore + '.getState().setLocale("ru")}'
-    $loader = $loader.Substring(0, $mi.Index) + $replacement + $loader.Substring($mi.Index + $mi.Length)
+    $core = $core.Substring(0, $mi.Index) + $replacement + $core.Substring($mi.Index + $mi.Length)
     $jfState = 'patched'
-  } elseif ($loader -match 'setLocale\("ru"\)') {
+  } elseif ($core -match 'setLocale\("ru"\)') {
     $jfState = 'already'
   }
 }
@@ -554,12 +612,21 @@ if ($failedPatches.Count -gt 0) {
   throw ("Не сработали патчи: " + ($failedPatches -join ', ') + ". Обычно это значит, что новая сборка OpenChamber изменила формат бандла. Файлы откатаны; сообщите об этом с версией приложения ($appVersion).")
 }
 
-if ($loader -ne $origLoader) {
-  Write-Utf8NoBom -Path $i18nFile -Content $loader
-  $script:touchedFiles += $i18nFile
-  Write-Ok 'Пропатченный лоадер сохранён.'
+if ($core -ne $origCore) {
+  Write-Utf8NoBom -Path $coreFile -Content $core
+  $script:touchedFiles += $coreFile
+  Write-Ok 'Пропатченное ядро i18n сохранено.'
 } else {
-  Write-Host '  Лоадер без изменений (всё уже применено).' -ForegroundColor DarkGray
+  Write-Host '  Ядро i18n без изменений (всё уже применено).' -ForegroundColor DarkGray
+}
+if (-not $sameFile) {
+  if ($intl -ne $origIntl) {
+    Write-Utf8NoBom -Path $intlFile -Content $intl
+    $script:touchedFiles += $intlFile
+    Write-Ok 'Пропатченный лоадер INTL сохранён.'
+  } else {
+    Write-Host '  INTL-лоадер без изменений (всё уже применено).' -ForegroundColor DarkGray
+  }
 }
 
 Next-Step 'Патч остальных локалей'
@@ -612,8 +679,9 @@ if ($localeSkipped.Count -gt 0) {
 
 Next-Step 'Проверка установки'
 $verifyErrors = @()
-$diskLoader = [System.IO.File]::ReadAllText($i18nFile, [System.Text.Encoding]::UTF8)
-foreach ($c in (Test-PatchedLoader -Loader $diskLoader -ChunkName $ruFileName)) {
+$diskCore = [System.IO.File]::ReadAllText($coreFile, [System.Text.Encoding]::UTF8)
+$diskIntl = if ($sameFile) { $diskCore } else { [System.IO.File]::ReadAllText($intlFile, [System.Text.Encoding]::UTF8) }
+foreach ($c in (Test-PatchedLoader -Core $diskCore -Intl $diskIntl -ChunkName $ruFileName)) {
   if (-not $c.ok) { $verifyErrors += ("loader." + $c.n) }
 }
 if (-not (Test-Path -LiteralPath $ruPath)) {
@@ -627,8 +695,10 @@ if (-not (Test-Path -LiteralPath $ruPath)) {
   if ($nodeCmd) {
     & node --check $ruPath | Out-Null
     if ($LASTEXITCODE -ne 0) { $verifyErrors += 'chunk.syntax' } else { Write-Ok 'Синтаксис чанка OK (node --check).' }
-    & node --check $i18nFile | Out-Null
-    if ($LASTEXITCODE -ne 0) { $verifyErrors += 'loader.syntax' } else { Write-Ok 'Синтаксис лоадера OK (node --check).' }
+    & node --check $coreFile | Out-Null
+    if ($LASTEXITCODE -ne 0) { $verifyErrors += 'core.syntax' } else { Write-Ok 'Синтаксис ядра OK (node --check).' }
+    & node --check $intlFile | Out-Null
+    if ($LASTEXITCODE -ne 0) { $verifyErrors += 'intl.syntax' } else { Write-Ok 'Синтаксис INTL-лоадера OK (node --check).' }
   } else {
     Write-Host '  node не найден — пропускаю проверку синтаксиса JS.' -ForegroundColor DarkGray
   }
@@ -654,7 +724,8 @@ if ($appVersion -ne 'unknown') {
     chunk      = $ruFileName
     keys       = $entries.Count
     date       = (Get-Date).ToString('o')
-    loader     = (Split-Path -Leaf $i18nFile)
+    core       = (Split-Path -Leaf $coreFile)
+    intl       = if ($sameFile) { $null } else { (Split-Path -Leaf $intlFile) }
     initOrig   = $initOrigText
   }
   Write-Utf8NoBom -Path $stampPath -Content ($stampObj | ConvertTo-Json)

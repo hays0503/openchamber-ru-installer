@@ -58,6 +58,29 @@ function Find-OpenChamberInstall {
   return $null
 }
 
+# Находит .js-файл в $Dir, в котором присутствуют ВСЕ искомые regex-паттерны.
+# Сначала проверяет файлы с именем вида $PreferredFilter (если задан), затем все остальные.
+function Find-ContentFile {
+  param([string]$Dir,[string[]]$Patterns,[string]$PreferredFilter)
+  $rx = @($Patterns | ForEach-Object { [regex]$_ })
+  $files = @(Get-ChildItem -LiteralPath $Dir -Filter '*.js' -File -ErrorAction SilentlyContinue | Where-Object { $_.Name -notmatch '\.bak$' })
+  $test = {
+    param($full)
+    $s = [System.IO.File]::ReadAllText($full, [System.Text.Encoding]::UTF8)
+    foreach ($r in $rx) { if (-not $r.IsMatch($s)) { return $false } }
+    return $true
+  }
+  if ($PreferredFilter) {
+    foreach ($f in ($files | Where-Object { $_.Name -like $PreferredFilter })) {
+      if (& $test $f.FullName) { return $f.FullName }
+    }
+  }
+  foreach ($f in $files) {
+    if (& $test $f.FullName) { return $f.FullName }
+  }
+  return $null
+}
+
 function Restore-FromBackup {
   param([string]$Path)
   $bak = "$Path.bak"
@@ -83,9 +106,11 @@ function Remove-RuFromLoader {
   $l = $Loader
   $l = [regex]::Replace($l, '(\["en"(?:,"[A-Za-z-]+")*),"ru"\]', '$1]')
   $l = $l -replace ',ru:"common\.language\.russian"\}', '}'
-  $l = $l -replace 'e==="ru"\|\|e\.startsWith\("ru-"\)\?"ru":', ''
+  # Имя параметра normalizeLocale гибкое (в 2.2.0 t, в 2.1.x e) — вырезаем по маске.
+  $l = $l -replace '[A-Za-z_$][A-Za-z0-9_$]*==="ru"\|\|[A-Za-z_$][A-Za-z0-9_$]*\.startsWith\("ru-"\)\?"ru":', ''
   $l = $l -replace ',ru:"ru-RU"\}', '}'
-  $l = $l -replace ':t==="ru"\?await\s+\w+\(\(\)=>import\("\./ru-[^"]+\.js"\)(?:,__vite__mapDeps\(\[[0-9,]*\]\))?(?:,\[\])?\)', ''
+  # Имя параметра импорта гибкое (в 2.2.0 e, в 2.1.x t).
+  $l = $l -replace ':[A-Za-z_$][A-Za-z0-9_$]*==="ru"\?await\s+\w+\(\(\)=>import\("\./ru-[^"]+\.js"\)(?:,__vite__mapDeps\(\[[0-9,]*\]\))?(?:,\[\])?\)', ''
   $initLeft = $false
   if ($l -match 'setLocale\("ru"\)') {
     $reversed = $false
@@ -170,27 +195,45 @@ foreach ($f in $ruFiles) {
 }
 if (-not $ruFiles) { Write-Host '  ru-*.js чанки не найдены.' -ForegroundColor DarkGray }
 
-Write-Step 'Восстанавливаю лоадер i18n из бэкапа...'
+Write-Step 'Восстанавливаю файлы i18n...'
+# Сначала берём имена из штампа (там точные имена файлов), иначе ищем по контенту.
+$coreFile = $null; $intlFile = $null
+if ($stamp -and $stamp.core) {
+  $cand = Join-Path $assets $stamp.core
+  if (Test-Path -LiteralPath $cand) { $coreFile = $cand }
+}
+if (-not $coreFile) {
+  $coreFile = Find-ContentFile -Dir $assets -Patterns @('\["en"(?:,"[A-Za-z-]+")+\]', 'tr:"common\.language\.turkish"')
+}
+if ($stamp -and $stamp.intl) {
+  $cand = Join-Path $assets $stamp.intl
+  if (Test-Path -LiteralPath $cand) { $intlFile = $cand }
+}
+if (-not $intlFile) {
+  $intlFile = Find-ContentFile -Dir $assets -Patterns @('\{en:"en-US"[^{}]{0,400}?\}') -PreferredFilter 'useAppFontEffects-*.js'
+}
+if (-not $intlFile) { $intlFile = $coreFile }
+
 $initLeft = $false
-$i18nFile = Get-ChildItem -LiteralPath $assets -Filter 'useAppFontEffects-*.js' -ErrorAction SilentlyContinue | Select-Object -First 1
-if ($i18nFile) {
-  if (Restore-FromBackup -Path $i18nFile.FullName) {
-    Write-Ok "  Восстановлен $(Split-Path -Leaf $i18nFile.FullName)"
+foreach ($pf in @(@($coreFile) + @($intlFile) | Select-Object -Unique)) {
+  if (-not $pf -or -not (Test-Path -LiteralPath $pf)) { continue }
+  $leaf = Split-Path -Leaf $pf
+  if (Restore-FromBackup -Path $pf) {
+    Write-Ok "  Восстановлен $leaf"
   } else {
-    Write-Warn '  Бэкапа лоадера нет — пробую хирургический откат...'
-    $loaderText = [System.IO.File]::ReadAllText($i18nFile.FullName, [System.Text.Encoding]::UTF8)
-    if ($loaderText -match 't==="ru"|,"ru"\]|ru:"common\.language\.russian"|startsWith\("ru-"\)|setLocale\("ru"\)|ru:"ru-RU"') {
+    Write-Warn "  Бэкапа $leaf нет — пробую хирургический откат..."
+    $loaderText = [System.IO.File]::ReadAllText($pf, [System.Text.Encoding]::UTF8)
+    if ($loaderText -match '==="ru"\?await|,"ru"\]|ru:"common\.language\.russian"|startsWith\("ru-"\)|setLocale\("ru"\)|ru:"ru-RU"') {
       $rev = Remove-RuFromLoader -Loader $loaderText -InitOrig $stamp.initOrig
-      [System.IO.File]::WriteAllText($i18nFile.FullName, $rev.text, (New-Object System.Text.UTF8Encoding $false))
-      Write-Ok '  RU-правки вырезаны из лоадера.'
-      $initLeft = $rev.initLeft
+      [System.IO.File]::WriteAllText($pf, $rev.text, (New-Object System.Text.UTF8Encoding $false))
+      Write-Ok '  RU-правки вырезаны.'
+      if ($rev.initLeft) { $initLeft = $true }
     } else {
-      Write-Host '  В лоадере нет RU-правок.' -ForegroundColor DarkGray
+      Write-Host "  В $leaf нет RU-правок." -ForegroundColor DarkGray
     }
   }
-} else {
-  Write-Warn '  useAppFontEffects-*.js не найден.'
 }
+if (-not $coreFile) { Write-Warn '  Ядро i18n не найдено — проверка маркеров ограничена.' }
 
 Write-Step 'Восстанавливаю чанки локалей из бэкапов...'
 # Список локалей держим в паре с установщиком (install-desktop-ru.ps1, шаг 5).
@@ -230,11 +273,15 @@ $leftRu = @(Get-ChildItem -LiteralPath $assets -Filter 'ru-*.js' -ErrorAction Si
 if ($leftRu.Count -gt 0) { Write-Err ("  остались чанки: " + (($leftRu | ForEach-Object { $_.Name }) -join ', ')); $verifyOk = $false }
 $leftBak = @(Get-ChildItem -LiteralPath $assets -Filter '*.bak' -ErrorAction SilentlyContinue)
 if ($leftBak.Count -gt 0) { Write-Warn ("  остались бэкапы: " + (($leftBak | ForEach-Object { $_.Name }) -join ', ')) }
-if ($i18nFile -and (Test-Path -LiteralPath $i18nFile.FullName)) {
-  $finalLoader = [System.IO.File]::ReadAllText($i18nFile.FullName, [System.Text.Encoding]::UTF8)
-  $markers = @('t==="ru"', ',"ru"]', 'ru:"common.language.russian"', 'startsWith("ru-")', 'ru:"ru-RU"')
+if ($coreFile -and (Test-Path -LiteralPath $coreFile)) {
+  $finalLoader = [System.IO.File]::ReadAllText($coreFile, [System.Text.Encoding]::UTF8)
+  $markers = @('==="ru"?await', ',"ru"]', 'ru:"common.language.russian"', 'startsWith("ru-")', 'setLocale("ru")', 'ru:"ru-RU"')
   $hit = @($markers | Where-Object { $finalLoader.Contains($_) })
-  if ($hit.Count -gt 0) { Write-Err ("  в лоадере остались RU-маркеры: " + ($hit -join ', ')); $verifyOk = $false }
+  if ($hit.Count -gt 0) { Write-Err ("  в ядре остались RU-маркеры: " + ($hit -join ', ')); $verifyOk = $false }
+}
+if ($intlFile -and $intlFile -ne $coreFile -and (Test-Path -LiteralPath $intlFile)) {
+  $finalIntl = [System.IO.File]::ReadAllText($intlFile, [System.Text.Encoding]::UTF8)
+  if ($finalIntl.Contains('ru:"ru-RU"')) { Write-Err '  в INTL-лоадере остался маркер ru:"ru-RU"'; $verifyOk = $false }
 }
 $localeLeft = @(Get-ChildItem -LiteralPath $assets -Filter '*.js' -ErrorAction SilentlyContinue | Where-Object {
   $_.Name -match $localeRx
