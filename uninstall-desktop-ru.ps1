@@ -84,6 +84,7 @@ function Remove-RuFromLoader {
   $l = [regex]::Replace($l, '(\["en"(?:,"[A-Za-z-]+")*),"ru"\]', '$1]')
   $l = $l -replace ',ru:"common\.language\.russian"\}', '}'
   $l = $l -replace 'e==="ru"\|\|e\.startsWith\("ru-"\)\?"ru":', ''
+  $l = $l -replace ',ru:"ru-RU"\}', '}'
   $l = $l -replace ':t==="ru"\?await\s+\w+\(\(\)=>import\("\./ru-[^"]+\.js"\)(?:,__vite__mapDeps\(\[[0-9,]*\]\))?(?:,\[\])?\)', ''
   $initLeft = $false
   if ($l -match 'setLocale\("ru"\)') {
@@ -178,7 +179,7 @@ if ($i18nFile) {
   } else {
     Write-Warn '  Бэкапа лоадера нет — пробую хирургический откат...'
     $loaderText = [System.IO.File]::ReadAllText($i18nFile.FullName, [System.Text.Encoding]::UTF8)
-    if ($loaderText -match 't==="ru"|,"ru"\]|ru:"common\.language\.russian"|startsWith\("ru-"\)|setLocale\("ru"\)') {
+    if ($loaderText -match 't==="ru"|,"ru"\]|ru:"common\.language\.russian"|startsWith\("ru-"\)|setLocale\("ru"\)|ru:"ru-RU"') {
       $rev = Remove-RuFromLoader -Loader $loaderText -InitOrig $stamp.initOrig
       [System.IO.File]::WriteAllText($i18nFile.FullName, $rev.text, (New-Object System.Text.UTF8Encoding $false))
       Write-Ok '  RU-правки вырезаны из лоадера.'
@@ -231,7 +232,7 @@ $leftBak = @(Get-ChildItem -LiteralPath $assets -Filter '*.bak' -ErrorAction Sil
 if ($leftBak.Count -gt 0) { Write-Warn ("  остались бэкапы: " + (($leftBak | ForEach-Object { $_.Name }) -join ', ')) }
 if ($i18nFile -and (Test-Path -LiteralPath $i18nFile.FullName)) {
   $finalLoader = [System.IO.File]::ReadAllText($i18nFile.FullName, [System.Text.Encoding]::UTF8)
-  $markers = @('t==="ru"', ',"ru"]', 'ru:"common.language.russian"', 'startsWith("ru-")')
+  $markers = @('t==="ru"', ',"ru"]', 'ru:"common.language.russian"', 'startsWith("ru-")', 'ru:"ru-RU"')
   $hit = @($markers | Where-Object { $finalLoader.Contains($_) })
   if ($hit.Count -gt 0) { Write-Err ("  в лоадере остались RU-маркеры: " + ($hit -join ', ')); $verifyOk = $false }
 }

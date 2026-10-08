@@ -278,6 +278,8 @@ function Test-PatchedLoader {
   $res += @{ n = 'normalize'; ok = ($Loader -match 'startsWith\("ru-"\)') }
   $res += @{ n = 'import';    ok = ($Loader.Contains($ChunkName) -and ($Loader -match 't==="ru"')) }
   $res += @{ n = 'init';      ok = ($Loader -match 'setLocale\("ru"\)') }
+  # INTL-карта: либо ru:"ru-RU" добавлен, либо карты нет вовсе (старые сборки).
+  $res += @{ n = 'intl';      ok = (($Loader -match 'ru:"ru-RU"') -or ($Loader -notmatch '\{en:"en-US"')) }
   return $res
 }
 
@@ -423,6 +425,7 @@ function Report-PatchState {
   $patchStates[$Name] = $State
   if ($State -eq 'patched') { Write-Ok "Пропатчено: $Name." }
   elseif ($State -eq 'already') { Write-Host "  $Name — уже пропатчено." -ForegroundColor DarkGray }
+  elseif ($State -eq 'skip') { Write-Warn "Пропущено: $Name (якоря нет, старая сборка)." }
   else { Write-Err "НЕ УДАЛОСЬ пропатчить: $Name (якорь не найден)." }
 }
 
@@ -470,6 +473,25 @@ if ($m.Success -and $loader -notmatch 'startsWith\("ru-"\)') {
   $normState = 'already'
 }
 Report-PatchState -Name 'normalizeLocale' -State $normState
+
+# INTL-карта locale -> Intl-тег ({en:"en-US",...,tr:"tr-TR"}) не знает про "ru",
+# и getCurrentIntlLocale() молча падает на "en-US": 12-часовой формат (AM/PM),
+# en-US порядок дат и запятая в числах. Добавляем ru:"ru-RU" -> 24-часовой формат.
+$intlState = 'FAILED'
+$m = [regex]::Match($loader, '\{en:"en-US"[^{}]{0,400}?\}')
+if ($m.Success -and $m.Value -notmatch 'ru:"ru-RU"') {
+  $replacement = $m.Value.Substring(0, $m.Value.Length - 1) + ',ru:"ru-RU"}'
+  $loader = $loader.Substring(0, $m.Index) + $replacement + $loader.Substring($m.Index + $m.Length)
+  $intlState = 'patched'
+} elseif ($loader -match 'ru:"ru-RU"') {
+  $intlState = 'already'
+} elseif (-not $m.Success -and $loader -notmatch '\{en:"en-US"') {
+  # Старые сборки (v1.14.x) могли не иметь этой карты вовсе — там и время
+  # форматируется иначе. Не валим установку, только предупреждаем.
+  $intlState = 'skip'
+  Write-Warn 'INTL-карта локалей не найдена (старая сборка?) — формат времени останется системным.'
+}
+Report-PatchState -Name 'INTL locale map (ru -> ru-RU)' -State $intlState
 
 $importState = 'FAILED'
 if ($loader -match (':t==="ru"\?await\s+\w+\(\(\)=>import\("\./' + [regex]::Escape($ruFileName) + '"\)')) {
