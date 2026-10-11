@@ -2285,7 +2285,7 @@ export const dict = {
   "sessions.sidebar.header.projectSort.zToA": "Я → А",
   "sessions.sidebar.header.projectSort.dateAdded": "Самые новые",
   "sessions.sidebar.header.projectSort.recent": "Недавние",
-  "sessions.sidebar.activity.chatsTitle": "чаты",
+  "sessions.sidebar.activity.chatsTitle": "Чаты",
   "sessions.sidebar.activity.chatsEmpty": "Чатов пока нет.",
   "chat.chatInput.chooseProject": "Выбрать проект",
   "sessions.archivePage.allDirectories": "Все каталоги",
