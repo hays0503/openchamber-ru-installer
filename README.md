@@ -67,7 +67,7 @@ irm https://raw.githubusercontent.com/kotobarsik/openchamber-ru-installer/main/u
 - `install-desktop-ru.cmd` / `install-desktop-ru.ps1` — установщик.
 - `uninstall-desktop-ru.cmd` / `uninstall-desktop-ru.ps1` — удаление.
 - `install.ps1` / `uninstall.ps1` — загрузчики для запуска одной командой из сети.
-- `i18n/messages/ru.ts` / `i18n/messages/ru.settings.ts` — исходники перевода (7309 ключей, полное покрытие словаря v2.2.0; сверено со всем графом импортов английского словаря `en.ts` + `en.settings.ts` + 19 общих `*.i18n.ts`: нет пропусков, нет устаревших ключей, плейсхолдеры `{…}` совпадают).
+- `i18n/messages/ru.ts` / `i18n/messages/ru.settings.ts` — исходники перевода (7309 ключей, полное покрытие словаря v2.2.0; сверено со всем графом импортов английского словаря `en.ts` + `en.settings.ts` + 21 общих `*.i18n.ts`: нет пропусков, нет устаревших ключей, плейсхолдеры `{…}` совпадают).
 
 ## Флаги и автоматизация
 - `install-desktop-ru.cmd ["путь"] [-Force]` / `uninstall-desktop-ru.cmd ["путь"] [-Force]`:
