@@ -5,7 +5,15 @@
 
 $ErrorActionPreference = 'Stop'
 
-$scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
+# Под `irm ... | iex` путь скрипта пуст. $scriptDir нужен только для локального
+# запуска из клона репозитория, так что пустым он быть не должен.
+$scriptDir = if ($MyInvocation.MyCommand.Path) { Split-Path -Parent $MyInvocation.MyCommand.Path } else { '' }
+
+# Windows PowerShell 5.1 на части машин не включает TLS 1.2, а он обязателен
+# для raw.githubusercontent.com.
+if ([Net.ServicePointManager]::SecurityProtocol -notmatch 'Tls12') {
+  [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
+}
 
 function Write-Log { param([string]$m) try { Add-Content -LiteralPath $script:logFile -Value ("[{0}] {1}" -f (Get-Date -Format 'yyyy-MM-dd HH:mm:ss'), $m) -Encoding UTF8 -ErrorAction SilentlyContinue } catch {} }
 function Write-Step { param([string]$m) Write-Host "[i] $m" -ForegroundColor Cyan; Write-Log "[i] $m" }
@@ -110,6 +118,35 @@ function Backup-File {
 function Write-Utf8NoBom {
   param([string]$Path,[string]$Content)
   [System.IO.File]::WriteAllText($Path, $Content, (New-Object System.Text.UTF8Encoding $false))
+}
+
+# Откуда качать исходники перевода, когда установщик запущен из сети
+# (`irm https://... | iex`) и рядом нет файлов репозитория.
+# OC_RU_SOURCE — переопределение для тестов/зеркал.
+$script:SourceBase = if ($env:OC_RU_SOURCE) { $env:OC_RU_SOURCE } else { 'https://raw.githubusercontent.com/kotobarsik/openchamber-ru-installer/main' }
+
+# Отдаёт путь к i18n-исходнику: локальный файл из клона, иначе свежая загрузка
+# в %TEMP%. Качаем каждый раз заново с cache-buster — иначе «обновить перевод»
+# молча подставит старый файл из кэша.
+function Get-MessagesFile {
+  param([string]$Name)
+  if ($scriptDir) {
+    $local = Join-Path $scriptDir "i18n\messages\$Name"
+    if (Test-Path -LiteralPath $local) { return $local }
+  }
+  $cacheDir = Join-Path $env:TEMP 'openchamber-ru'
+  if (-not (Test-Path -LiteralPath $cacheDir)) { New-Item -ItemType Directory -Path $cacheDir -Force | Out-Null }
+  $out = Join-Path $cacheDir $Name
+  # ${Name}, а не $Name? — в PowerShell '?' допустим в имени переменной,
+  # и без скобок URL остался бы без имени файла.
+  $url = "$script:SourceBase/i18n/messages/${Name}?$([DateTimeOffset]::UtcNow.ToUnixTimeSeconds())"
+  Write-Step "Скачиваю перевод: $Name"
+  try {
+    Invoke-WebRequest -Uri $url -OutFile $out -UseBasicParsing -Headers @{ 'Cache-Control' = 'no-cache' }
+  } catch {
+    throw ("Не удалось скачать перевод ({0}): {1}. Проверьте интернет или задайте другой адрес через OC_RU_SOURCE." -f $Name, $_.Exception.Message)
+  }
+  return $out
 }
 
 function ConvertTo-StringEscape {
@@ -418,10 +455,8 @@ if ($staleReason) {
   $stamp = $null
 }
 
-$ruSrc       = Join-Path $scriptDir 'i18n\messages\ru.ts'
-$ruSettings  = Join-Path $scriptDir 'i18n\messages\ru.settings.ts'
-if (-not (Test-Path -LiteralPath $ruSrc))      { throw "Нет файла: $ruSrc" }
-if (-not (Test-Path -LiteralPath $ruSettings)) { throw "Нет файла: $ruSettings" }
+$ruSrc       = Get-MessagesFile 'ru.ts'
+$ruSettings  = Get-MessagesFile 'ru.settings.ts'
 
 Next-Step 'Разбор словарей ru.ts и ru.settings.ts'
 $dictBody     = Parse-TsDictBody -FilePath $ruSrc      -ExportName 'dict'
