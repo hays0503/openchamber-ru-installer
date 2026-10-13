@@ -105,7 +105,9 @@ function Remove-RuFromLoader {
   param([string]$Loader,[string]$InitOrig)
   $l = $Loader
   $l = [regex]::Replace($l, '(\["en"(?:,"[A-Za-z-]+")*),"ru"\]', '$1]')
-  $l = $l -replace ',ru:"common\.language\.russian"\}', '}'
+  # В 2.3.1 ru вставляется после tr, а дальше идут ar/he, поэтому '…russian"}' уже не
+  # закрывает объект — вырезаем саму пару целиком, не трогая следующую за ней.
+  $l = $l -replace ',ru:"common\.language\.russian"', ''
   # Имя параметра normalizeLocale гибкое (в 2.2.0 t, в 2.1.x e) — вырезаем по маске.
   $l = $l -replace '[A-Za-z_$][A-Za-z0-9_$]*==="ru"\|\|[A-Za-z_$][A-Za-z0-9_$]*\.startsWith\("ru-"\)\?"ru":', ''
   $l = $l -replace ',ru:"ru-RU"\}', '}'

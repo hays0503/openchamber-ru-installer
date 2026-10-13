@@ -535,8 +535,11 @@ if ($m.Success -and $m.Value -notmatch '"ru"') {
 Report-PatchState -Name 'LOCALES array' -State $localesState
 
 $labelsState = 'FAILED'
-$m = [regex]::Match($core, 'tr:"common\.language\.turkish"\}')
-$labelsReplacement = 'tr:"common.language.turkish",ru:"common.language.russian"}'
+# В 2.3.1 после tr идут ar/he, поэтому старый якорь '…turkish"}' больше не совпадает.
+# Цепляемся к самой паре tr и вставляем ru сразу после неё (закрывающая скобка
+# объекта остаётся на месте, что верно и для старых сборок, где tr был последним).
+$m = [regex]::Match($core, 'tr:"common\.language\.turkish"')
+$labelsReplacement = 'tr:"common.language.turkish",ru:"common.language.russian"'
 if (-not $m.Success) {
   # Fallback for older builds (v1.14.x) without de/tr locales
   $m = [regex]::Match($core, '(ja:"common\.language\.japanese"\s*,?\s*\})')
@@ -552,17 +555,20 @@ Report-PatchState -Name 'LOCALE_LABEL_KEYS' -State $labelsState
 
 # normalizeLocale: имя параметра функции берём из реального кода tr-ветки через
 # обратную ссылку (в 2.2.0 параметр t, в 2.1.x был e).
+# В 2.3.1 после tr-ветки идут ar/he, поэтому якорь, требовавший '…"tr":}' (конец
+# цепочки), больше не срабатывает. Цепляемся к самой tr-ветке и вставляем ru-ветку
+# ПЕРЕД ней — это одинаково верно и для старых сборок, где после tr шла '}'.
 $normState = 'FAILED'
-$m = [regex]::Match($core, '([A-Za-z_$][A-Za-z0-9_$]*)==="tr"\|\|\1\.startsWith\("tr-"\)\?"tr":([A-Za-z_$][A-Za-z0-9_$]*)\}')
-$normParam = $null; $normDefault = $null
-if ($m.Success) { $normParam = $m.Groups[1].Value; $normDefault = $m.Groups[2].Value }
+$m = [regex]::Match($core, '([A-Za-z_$][A-Za-z0-9_$]*)==="tr"\|\|\1\.startsWith\("tr-"\)\?"tr":')
+$normParam = $null
+if ($m.Success) { $normParam = $m.Groups[1].Value }
 if (-not $m.Success) {
   # Fallback for older builds (v1.14.x): последняя известная локаль — pl
-  $m = [regex]::Match($core, '([A-Za-z_$][A-Za-z0-9_$]*)==="pl"\|\|\1\.startsWith\("pl-"\)\?"pl":([A-Za-z_$][A-Za-z0-9_$]*)\}')
-  if ($m.Success) { $normParam = $m.Groups[1].Value; $normDefault = $m.Groups[2].Value }
+  $m = [regex]::Match($core, '([A-Za-z_$][A-Za-z0-9_$]*)==="pl"\|\|\1\.startsWith\("pl-"\)\?"pl":')
+  if ($m.Success) { $normParam = $m.Groups[1].Value }
 }
 if ($m.Success -and $core -notmatch 'startsWith\("ru-"\)') {
-  $replacement = $normParam + '==="ru"||' + $normParam + '.startsWith("ru-")?"ru":' + $normDefault + '}'
+  $replacement = $normParam + '==="ru"||' + $normParam + '.startsWith("ru-")?"ru":' + $m.Value
   $core = $core.Substring(0, $m.Index) + $replacement + $core.Substring($m.Index + $m.Length)
   $normState = 'patched'
 } elseif ($core -match 'startsWith\("ru-"\)') {
