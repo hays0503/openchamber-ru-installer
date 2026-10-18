@@ -108,6 +108,8 @@ function Remove-RuFromLoader {
   # В 2.3.1 ru вставляется после tr, а дальше идут ar/he, поэтому '…russian"}' уже не
   # закрывает объект — вырезаем саму пару целиком, не трогая следующую за ней.
   $l = $l -replace ',ru:"common\.language\.russian"', ''
+  # Подпись «Russian» в английском словаре внутри ядра (шаг «EN dict»).
+  $l = $l -replace '"common\.language\.russian":"Russian",', ''
   # Имя параметра normalizeLocale гибкое (в 2.2.0 t, в 2.1.x e) — вырезаем по маске.
   $l = $l -replace '[A-Za-z_$][A-Za-z0-9_$]*==="ru"\|\|[A-Za-z_$][A-Za-z0-9_$]*\.startsWith\("ru-"\)\?"ru":', ''
   $l = $l -replace ',ru:"ru-RU"\}', '}'
@@ -225,7 +227,7 @@ foreach ($pf in @(@($coreFile) + @($intlFile) | Select-Object -Unique)) {
   } else {
     Write-Warn "  Бэкапа $leaf нет — пробую хирургический откат..."
     $loaderText = [System.IO.File]::ReadAllText($pf, [System.Text.Encoding]::UTF8)
-    if ($loaderText -match '==="ru"\?await|,"ru"\]|ru:"common\.language\.russian"|startsWith\("ru-"\)|setLocale\("ru"\)|ru:"ru-RU"') {
+    if ($loaderText -match '==="ru"\?await|,"ru"\]|ru:"common\.language\.russian"|"common\.language\.russian":"Russian"|startsWith\("ru-"\)|setLocale\("ru"\)|ru:"ru-RU"') {
       $rev = Remove-RuFromLoader -Loader $loaderText -InitOrig $stamp.initOrig
       [System.IO.File]::WriteAllText($pf, $rev.text, (New-Object System.Text.UTF8Encoding $false))
       Write-Ok '  RU-правки вырезаны.'
@@ -240,7 +242,7 @@ if (-not $coreFile) { Write-Warn '  Ядро i18n не найдено — про
 Write-Step 'Восстанавливаю чанки локалей из бэкапов...'
 # Список локалей держим в паре с установщиком (install-desktop-ru.ps1, шаг 5).
 # Если добавить новую локаль там и забыть здесь — uninstall оставит её .bak.
-$localeRx = '^(en|fr|zh-CN|zh-TW|uk|es|pt-BR|ko|pl|ja|de|tr|nl)-'
+$localeRx = '^(en|fr|zh-CN|zh-TW|uk|es|pt-BR|ko|pl|ja|de|tr|nl|ar|he)-'
 $localeFiles = Get-ChildItem -LiteralPath $assets -Filter '*.js' -ErrorAction SilentlyContinue | Where-Object {
   $_.Name -match $localeRx
 }
@@ -277,7 +279,7 @@ $leftBak = @(Get-ChildItem -LiteralPath $assets -Filter '*.bak' -ErrorAction Sil
 if ($leftBak.Count -gt 0) { Write-Warn ("  остались бэкапы: " + (($leftBak | ForEach-Object { $_.Name }) -join ', ')) }
 if ($coreFile -and (Test-Path -LiteralPath $coreFile)) {
   $finalLoader = [System.IO.File]::ReadAllText($coreFile, [System.Text.Encoding]::UTF8)
-  $markers = @('==="ru"?await', ',"ru"]', 'ru:"common.language.russian"', 'startsWith("ru-")', 'setLocale("ru")', 'ru:"ru-RU"')
+  $markers = @('==="ru"?await', ',"ru"]', 'ru:"common.language.russian"', '"common.language.russian":"Russian"', 'startsWith("ru-")', 'setLocale("ru")', 'ru:"ru-RU"')
   $hit = @($markers | Where-Object { $finalLoader.Contains($_) })
   if ($hit.Count -gt 0) { Write-Err ("  в ядре остались RU-маркеры: " + ($hit -join ', ')); $verifyOk = $false }
 }

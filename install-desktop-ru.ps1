@@ -338,6 +338,9 @@ function Test-PatchedLoader {
   $res += @{ n = 'normalize'; ok = ($Core -match 'startsWith\("ru-"\)') }
   $res += @{ n = 'import';    ok = ($Core.Contains($ChunkName) -and ($Core -match '[A-Za-z_$][A-Za-z0-9_$]*==="ru"\?await')) }
   $res += @{ n = 'init';      ok = ($Core -match 'setLocale\("ru"\)') }
+  # Подпись «Russian» для английского словаря: либо добавлена, либо EN-словарь
+  # этой сборки не содержит карты подписей языков (очень старые сборки).
+  $res += @{ n = 'en-label';  ok = (($Core -match '"common\.language\.russian":"Russian"') -or ($Core -notmatch '"common\.language\.hebrew":"Hebrew"')) }
   # INTL-карта: либо ru:"ru-RU" добавлен, либо карты нет вовсе (старые сборки).
   $res += @{ n = 'intl';      ok = (($Intl -match 'ru:"ru-RU"') -or ($Intl -notmatch '\{en:"en-US"')) }
   return $res
@@ -553,6 +556,25 @@ if ($m.Success -and $core -notmatch 'ru:"common\.language\.russian"') {
 }
 Report-PatchState -Name 'LOCALE_LABEL_KEYS' -State $labelsState
 
+# EN-словарь встроен в ядро, и подписи языков берутся из него как запасной вариант
+# (e[t] ?? en[t] ?? t). Без ключа common.language.russian в английском интерфейсе
+# список языков показал бы сырое имя ключа вместо «Russian». Локали-чанки получают
+# эту пару в шаге 5, английскому словарю её добавляем здесь.
+$enLabelState = 'FAILED'
+if ($core -match '"common\.language\.russian":"Russian"') {
+  $enLabelState = 'already'
+} else {
+  $mEn = [regex]::Match($core, '"common\.language\.hebrew":"Hebrew",')
+  if ($mEn.Success) {
+    $core = $core.Substring(0, $mEn.Index + $mEn.Length) + '"common.language.russian":"Russian",' + $core.Substring($mEn.Index + $mEn.Length)
+    $enLabelState = 'patched'
+  } elseif ($core -notmatch '"common\.language\.hebrew":"Hebrew"') {
+    # Старые сборки без ar/he в словаре — подпись некуда вставлять, не валим установку.
+    $enLabelState = 'skip'
+  }
+}
+Report-PatchState -Name 'EN dict (common.language.russian)' -State $enLabelState
+
 # normalizeLocale: имя параметра функции берём из реального кода tr-ветки через
 # обратную ссылку (в 2.2.0 параметр t, в 2.1.x был e).
 # В 2.3.1 после tr-ветки идут ar/he, поэтому якорь, требовавший '…"tr":}' (конец
@@ -647,6 +669,13 @@ if ($jfState -ne 'patched') {
 }
 Report-PatchState -Name 'startup locale init' -State $jfState
 
+# Повторный запуск поверх уже пропатченного ядра не может восстановить исходный
+# вид init-функции — берём его из штампа прошлой установки, иначе удаление
+# без .bak не сможет вернуть файл байт-в-байт.
+if (-not $initOrigText -and $stamp -and $stamp.initOrig -and ($core -match 'setLocale\("ru"\)')) {
+  $initOrigText = $stamp.initOrig
+}
+
 $failedPatches = @($patchStates.Keys | Where-Object { $patchStates[$_] -eq 'FAILED' })
 if ($failedPatches.Count -gt 0) {
   Invoke-Rollback -ChunkPath $ruPath
@@ -673,7 +702,7 @@ if (-not $sameFile) {
 Next-Step 'Патч остальных локалей'
 Write-Step 'Добавляю common.language.russian в остальные локали...'
 $localeFiles = Get-ChildItem -LiteralPath $assets -Filter '*.js' -ErrorAction SilentlyContinue | Where-Object {
-  $_.Name -match '^(en|fr|zh-CN|zh-TW|uk|es|pt-BR|ko|pl|ja|de|tr|nl)-' -and $_.Name -notmatch '^ru-'
+  $_.Name -match '^(en|fr|zh-CN|zh-TW|uk|es|pt-BR|ko|pl|ja|de|tr|nl|ar|he)-' -and $_.Name -notmatch '^ru-'
 }
 $localeFailed = @()
 $localeSkipped = @()
